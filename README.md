@@ -8,7 +8,7 @@ which subdomains are **alive** and what **HTTP status code** they return.
 This is the natural next step after subdomain enumeration: a wildcard recon run can
 surface hundreds of names, but most are dead. SUBtl-Check trims that list down to the
 live hosts worth looking at and saves a clean **bare-hostname** `*_alive.txt` you can
-hand straight to a takeover scanner like [Subdomain_Takeover](../Subdomain_Takeover).
+hand straight to a takeover scanner like [Subdomain_Takeover](https://github.com/an-sh7/Subdomain_Takeover).
 
 > ⚠️ **For authorized security testing and responsible-disclosure research only.**
 > Only probe hosts you own or have explicit written permission to test.
@@ -71,7 +71,7 @@ input named `tesla_com.txt` you get:
 
 | File | Contents |
 |------|----------|
-| `tesla_com_alive.txt` | The **bare hostnames** that responded, one per line (e.g. `shop.tesla.com`) — deduped and scheme-stripped, ready to pipe straight into [Subdomain_Takeover](../Subdomain_Takeover) or any other tool. |
+| `tesla_com_alive.txt` | The **bare hostnames** that responded, one per line (e.g. `shop.tesla.com`) — deduped and scheme-stripped, ready to pipe straight into [Subdomain_Takeover](https://github.com/an-sh7/Subdomain_Takeover) or any other tool. |
 
 Dead/unresolved hosts are simply left out — keeping only the live ones is automatic, so
 there's no separate "prune" step. If you also pass `-o <file>`, the status-code
