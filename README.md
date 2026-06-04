@@ -7,8 +7,8 @@ which subdomains are **alive** and what **HTTP status code** they return.
 
 This is the natural next step after subdomain enumeration: a wildcard recon run can
 surface hundreds of names, but most are dead. SUBtl-Check trims that list down to the
-hosts actually worth looking at (and produces a clean `*_alive.txt` you can hand to a
-takeover scanner like [Subdomain_Takeover](../Subdomain_Takeover)).
+live hosts worth looking at and saves a clean **bare-hostname** `*_alive.txt` you can
+hand straight to a takeover scanner like [Subdomain_Takeover](../Subdomain_Takeover).
 
 > ⚠️ **For authorized security testing and responsible-disclosure research only.**
 > Only probe hosts you own or have explicit written permission to test.
@@ -33,6 +33,9 @@ chmod +x subtl_check.sh
 
 # A directory of subdomain lists (every *.txt in it — e.g. Sub_Recon's output):
 ./subtl_check.sh -d ../Sub_Recon/sub_recon
+
+# Be patient with slow/flaky targets, and also save a breakdown file:
+./subtl_check.sh -L subs.txt -s -o results.txt
 ```
 
 ### Options
@@ -41,6 +44,8 @@ chmod +x subtl_check.sh
 |------|-------------|
 | `-L <hosts_file>` | Check the hosts listed in a file (one per line; blank lines / `#comments` ignored). |
 | `-d <dir>` | Check every `*.txt` list in a directory. |
+| `-s` | **Slow mode** — longer timeout (30s), more retries (3), gentler concurrency (15 threads). Use when targets are slow or rate-limited so live-but-slow hosts aren't falsely marked dead. |
+| `-o <file>` | Also save the status-code breakdown to a single file (in addition to the per-list alive files). |
 | `-h` | Show usage. |
 
 You must provide exactly one of `-L` or `-d`.
@@ -61,20 +66,42 @@ rm ./.subtl-check_ran_already
 
 ## Output
 
-Results are written under `./subtl_check/`, one set of files per input list. For an
+For each input list, the live hosts are saved under `./domain_status_output/`. For an
 input named `tesla_com.txt` you get:
 
 | File | Contents |
 |------|----------|
-| `tesla_com_status.txt` | Every host with its probe result and status code, e.g. `https://shop.tesla.com [200] [SUCCESS]`. Dead hosts are recorded too (`[FAILED]`). |
-| `tesla_com_alive.txt` | Just the URLs that responded — ready to pipe into the next tool. |
+| `tesla_com_alive.txt` | The **bare hostnames** that responded, one per line (e.g. `shop.tesla.com`) — deduped and scheme-stripped, ready to pipe straight into [Subdomain_Takeover](../Subdomain_Takeover) or any other tool. |
 
-The script also prints a per-list summary to the terminal: **alive / dead counts** and a
-**status-code breakdown** (how many hosts returned 200, 301, 403, …), plus a grand total
-when more than one list is processed.
+Dead/unresolved hosts are simply left out — keeping only the live ones is automatic, so
+there's no separate "prune" step. If you also pass `-o <file>`, the status-code
+breakdown for every list is appended to that one file.
+
+### On screen
+
+The terminal shows a per-list summary: **alive / dead counts** and a **colour-coded
+status-code breakdown** — each code is labelled (`200 OK`, `403 Forbidden`, `502 Bad
+Gateway`, …) and the live URLs are grouped beneath it. When more than one list is
+processed, a grand total is printed at the end.
+
+```
+   Status Code Breakdown:
+
+   [200]  OK  (2 hosts)
+   [200]  https://example.com
+   [200]  https://github.com
+```
+
+## What counts as alive vs dead?
+
+`httpx` marks a host **alive** if it returns *any* HTTP response — `200`, `301`, `403`,
+`404`, `500` all count, because a server answered. A host is **dead** only when no HTTP
+response comes back at all (DNS doesn't resolve, connection refused, or timeout). Note
+that a merely *slow* host can be marked dead if it exceeds the timeout — that's what
+`-s` (slow mode) is for.
 
 ## Roadmap
 
-- **v1 (current): basic mode** — alive/dead + HTTP status code.
+- **v1 (current): basic mode** — alive/dead + HTTP status code, colour-coded breakdown.
 - **v2: rich enrichment** — page title, web server, content-length, detected tech stack,
   CDN, and final redirect URL, for faster triage of live hosts.

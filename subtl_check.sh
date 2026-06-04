@@ -9,16 +9,18 @@
 # hardcoded/default location.
 #
 # Usage:
-#   ./subtl_check.sh -L subs.txt     # check the hosts listed in a file (one/line)
-#   ./subtl_check.sh -d ./some_dir   # check every *.txt in a directory
+#   ./subtl_check.sh -L subs.txt              # check hosts in a file
+#   ./subtl_check.sh -d ./some_dir            # check every *.txt in a directory
+#   ./subtl_check.sh -L subs.txt -o out.txt   # also save the breakdown to a file
+#   ./subtl_check.sh -L subs.txt -s           # slow probe (patient on flaky hosts)
 #
 # Tools required: httpx (ProjectDiscovery). Auto-installed on first run.
 # =============================================================================
 
 SETUP_FLAG="./.subtl-check_ran_already"
 
-# All status output lands here, one set of files per processed list.
-OUTPUT_DIR="./subtl_check"
+# Per-list output (full status + clean alive list) always lands here.
+OUTPUT_DIR="./domain_status_output"
 
 # httpx tuning (basic mode).
 HTTPX_THREADS=50
@@ -164,39 +166,93 @@ if ! resolve_httpx; then
     exit 1
 fi
 
+# ── Colour helpers ─────────────────────────────────────────────────────────────
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+
+# Colour by status class: 2xx green, 3xx yellow, 4xx red, 5xx bright red.
+status_color() {
+    case "${1:0:1}" in
+        2) echo "\033[1;32m" ;;
+        3) echo "\033[1;33m" ;;
+        4) echo "\033[1;31m" ;;
+        5) echo "\033[1;91m" ;;
+        *) echo "\033[1;37m" ;;
+    esac
+}
+
+# ── Human-readable label for a status code ─────────────────────────────────────
+status_label() {
+    case "$1" in
+        100) echo "Continue" ;;
+        101) echo "Switching Protocols" ;;
+        200) echo "OK" ;;
+        201) echo "Created" ;;
+        204) echo "No Content" ;;
+        206) echo "Partial Content" ;;
+        301) echo "Moved Permanently" ;;
+        302) echo "Found (Redirect)" ;;
+        303) echo "See Other" ;;
+        304) echo "Not Modified" ;;
+        307) echo "Temporary Redirect" ;;
+        308) echo "Permanent Redirect" ;;
+        400) echo "Bad Request" ;;
+        401) echo "Unauthorized" ;;
+        403) echo "Forbidden" ;;
+        404) echo "Not Found" ;;
+        405) echo "Method Not Allowed" ;;
+        408) echo "Request Timeout" ;;
+        409) echo "Conflict" ;;
+        410) echo "Gone" ;;
+        413) echo "Payload Too Large" ;;
+        414) echo "URI Too Long" ;;
+        415) echo "Unsupported Media Type" ;;
+        429) echo "Too Many Requests" ;;
+        500) echo "Internal Server Error" ;;
+        501) echo "Not Implemented" ;;
+        502) echo "Bad Gateway" ;;
+        503) echo "Service Unavailable" ;;
+        504) echo "Gateway Timeout" ;;
+        521) echo "Web Server Is Down" ;;
+        522) echo "Connection Timed Out" ;;
+        523) echo "Origin Is Unreachable" ;;
+        524) echo "A Timeout Occurred" ;;
+        525) echo "SSL Handshake Failed" ;;
+        526) echo "Invalid SSL Certificate" ;;
+        530) echo "Site Frozen" ;;
+        *)   echo "" ;;
+    esac
+}
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 LIST_FILE=""
 SCAN_DIR=""
-
+OUTPUT_FILE=""
 SLOW_MODE=false
-REMOVE_FAILED=false
 
 usage() {
-    echo "Usage: $0 -L <hosts_file> | -d <dir> [-s] [-r]"
+    echo "Usage: $0 -L <hosts_file> | -d <dir> [-s] [-o <file>]"
     echo "  -L <hosts_file>   check the hosts listed in a file (one per line)"
     echo "  -d <dir>          check every *.txt in <dir>"
     echo "  -s                slow mode: longer timeout, more retries, gentler"
     echo "                    concurrency -- use when targets are slow or flaky"
     echo "                    so live-but-slow hosts aren't marked FAILED."
-    echo "  -r                remove failed (dead/unresolved) hosts from the input"
-    echo "                    list in place, keeping only live ones. A .bak backup"
-    echo "                    of each original list is written first. Pairs well"
-    echo "                    with -s so you don't prune hosts that were just slow."
+    echo "  -o <file>         also save the status-code breakdown to a single file"
+    echo "                    (in addition to the per-list alive files in $OUTPUT_DIR)."
     echo ""
     echo "  You must point the tool at an input explicitly; there is no default path."
     echo "  Examples:"
     echo "    $0 -L subs.txt"
-    echo "    $0 -d ../Sub_Recon/sub_recon"
+    echo "    $0 -L subs.txt -o results.txt"
     echo "    $0 -d ../Sub_Recon/sub_recon -s"
-    echo "    $0 -L subs.txt -s -r"
 }
 
-while getopts "L:d:srh" opt; do
+while getopts "L:d:o:sh" opt; do
     case $opt in
         L) LIST_FILE="$OPTARG" ;;
         d) SCAN_DIR="$OPTARG" ;;
+        o) OUTPUT_FILE="$OPTARG" ;;
         s) SLOW_MODE=true ;;
-        r) REMOVE_FAILED=true ;;
         h) usage; exit 0 ;;
         *) echo "Invalid option. Use -h for help."; exit 1 ;;
     esac
@@ -253,6 +309,12 @@ else
     fi
 fi
 
+# Prepare the optional combined breakdown file (wipe once so multi-list runs append cleanly).
+if [ -n "$OUTPUT_FILE" ]; then
+    mkdir -p "$(dirname "$OUTPUT_FILE")" 2>/dev/null
+    > "$OUTPUT_FILE"
+fi
+
 # ── Status-check routine (runs once per input file) ─────────────────────────────
 GRAND_TOTAL=0
 GRAND_ALIVE=0
@@ -260,10 +322,9 @@ GRAND_DEAD=0
 
 check_file() {
     local infile="$1"
-    local base status_file alive_file
+    local base tmp_status alive_file
     base="$(basename "$infile" .txt)"
-    status_file="$OUTPUT_DIR/${base}_status.txt"
-    alive_file="$OUTPUT_DIR/${base}_alive.txt"
+    alive_file="$OUTPUT_DIR/${base}_alive.txt"      # the only saved per-list file: clean alive URLs
 
     # Count non-blank, non-comment input hosts.
     local total
@@ -285,8 +346,10 @@ check_file() {
     [ "$SLOW_MODE" = true ] && mode_label="SLOW"
     echo "[*] Probing with httpx [$mode_label] (threads=$HTTPX_THREADS, timeout=${HTTPX_TIMEOUT}s, retries=$HTTPX_RETRIES) ..."
 
-    # Basic mode: status code + probe result (SUCCESS/FAILED) for every host,
-    # so both alive and dead hosts are recorded. No color so the file is parseable.
+    # Probe every host (status code + SUCCESS/FAILED) into a temp scratch file --
+    # used only for counts/breakdown below, then deleted. stdout is silenced
+    # (>/dev/null) so only our formatted breakdown reaches the screen.
+    tmp_status="$(mktemp)"
     "$HTTPX_BIN" \
         -l "$infile" \
         -silent \
@@ -296,66 +359,69 @@ check_file() {
         -threads "$HTTPX_THREADS" \
         -timeout "$HTTPX_TIMEOUT" \
         -retries "$HTTPX_RETRIES" \
-        -o "$status_file" 2>/dev/null
+        -o "$tmp_status" >/dev/null 2>&1
 
-    # Derive counts and a clean alive-hosts list (handy for feeding other tools).
+    # Derive counts and the clean alive-hosts list (the one file we keep).
     local alive dead
-    alive=$(grep -c '\[SUCCESS\]' "$status_file" 2>/dev/null); alive=${alive:-0}
-    dead=$(grep -c '\[FAILED\]' "$status_file" 2>/dev/null);   dead=${dead:-0}
+    alive=$(grep -c '\[SUCCESS\]' "$tmp_status" 2>/dev/null); alive=${alive:-0}
+    dead=$(grep -c '\[FAILED\]' "$tmp_status" 2>/dev/null);   dead=${dead:-0}
 
-    # Alive list = first column (the URL) of every SUCCESS line.
-    grep '\[SUCCESS\]' "$status_file" 2>/dev/null | awk '{print $1}' > "$alive_file"
+    # Alive list = bare hostname of every SUCCESS line (scheme/port/path stripped),
+    # ready to feed straight into Subdomain_Takeover and similar tools.
+    grep '\[SUCCESS\]' "$tmp_status" 2>/dev/null | awk '{print $1}' \
+        | sed -E 's#^[a-zA-Z]+://##; s#[:/].*$##' | sort -u > "$alive_file"
 
     echo ""
     echo "---------------------------------------------"
     echo "   Alive : $alive"
     echo "   Dead  : $dead"
     echo "---------------------------------------------"
-    echo "   Status code breakdown:"
-    # Pull every [NNN] status token and tally it.
-    grep -oE '\[[0-9]{3}\]' "$status_file" 2>/dev/null \
-        | tr -d '[]' | sort | uniq -c | sort -rn \
-        | awk '{printf "     %s  -> %s host(s)\n", $2, $1}'
-    echo "---------------------------------------------"
-    echo "   Full status : $status_file"
-    echo "   Alive hosts : $alive_file"
 
-    # -r : prune dead/unresolved hosts from the input list itself, keeping only
-    # the live ones (original bare-hostname format preserved). A .bak backup is
-    # written first so the operation is fully reversible.
-    if [ "$REMOVE_FAILED" = true ]; then
-        if [ "$dead" -eq 0 ]; then
-            echo "   -r          : nothing to remove (no failed hosts)"
-        else
-            local alive_norm pruned kept
-            alive_norm="$(mktemp)"
-            pruned="$(mktemp)"
-            # Normalize alive URLs down to bare hostnames for matching.
-            sed -E 's#^[a-zA-Z]+://##; s#[:/].*$##' "$alive_file" \
-                | tr 'A-Z' 'a-z' | sort -u > "$alive_norm"
-            # Keep only input lines whose host is alive (preserve the original text).
-            awk '
-                NR==FNR { alive[$0]=1; next }
-                {
-                    h=$0
-                    sub(/^[[:space:]]+/,"",h); sub(/[[:space:]]+$/,"",h)
-                    if (h=="" || h ~ /^#/) next
-                    sub(/^[a-zA-Z]+:\/\//,"",h)
-                    sub(/[:\/].*$/,"",h)
-                    h=tolower(h)
-                    if (h in alive) print $0
-                }
-            ' "$alive_norm" "$infile" > "$pruned"
-            cp "$infile" "${infile}.bak"
-            mv "$pruned" "$infile"
-            rm -f "$alive_norm"
-            kept=$(grep -vcE '^\s*(#|$)' "$infile" 2>/dev/null); kept=${kept:-0}
-            echo "   -r          : removed $dead failed host(s), kept $kept live"
-            echo "   backup      : ${infile}.bak"
-        fi
+    # ── Status-code breakdown: group the live URLs under each code ──────────────
+    # Grab the SUCCESS lines once, then slice them per code (no repeated file reads).
+    local succ codes
+    succ=$(grep '\[SUCCESS\]' "$tmp_status" 2>/dev/null)
+    codes=$(printf '%s\n' "$succ" | grep -oE '\[[0-9]{3}\]' | tr -d '[]' | sort -un)
+
+    if [ -n "$codes" ]; then
+        echo ""
+        echo "   Status Code Breakdown:"
+        [ -n "$OUTPUT_FILE" ] && printf "Status Code Breakdown — %s\n" "$base" >> "$OUTPUT_FILE"
+
+        local code color label count host_word line_hdr
+        while IFS= read -r code; do
+            color=$(status_color "$code")
+            label=$(status_label "$code")
+            count=$(printf '%s\n' "$succ" | grep -c "\[$code\]"); count=${count:-0}
+            [ "$count" -ne 1 ] && host_word="hosts" || host_word="host"
+
+            if [ -n "$label" ]; then
+                line_hdr="[$code]  $label  ($count $host_word)"
+            else
+                line_hdr="[$code]  ($count $host_word)"
+            fi
+
+            printf "\n   ${color}${C_BOLD}%s${C_RESET}\n" "$line_hdr"
+            [ -n "$OUTPUT_FILE" ] && printf "\n%s\n" "$line_hdr" >> "$OUTPUT_FILE"
+
+            # The live URLs that returned this code.
+            printf '%s\n' "$succ" | grep "\[$code\]" | awk '{print $1}' \
+                | while IFS= read -r url; do
+                    [ -z "$url" ] && continue
+                    printf "   ${color}${C_BOLD}[%s]${C_RESET}  %s\n" "$code" "$url"
+                    [ -n "$OUTPUT_FILE" ] && printf "[%s]  %s\n" "$code" "$url" >> "$OUTPUT_FILE"
+                  done
+        done <<< "$codes"
+        echo ""
+        [ -n "$OUTPUT_FILE" ] && echo "" >> "$OUTPUT_FILE"
     fi
 
+    echo "---------------------------------------------"
+    echo "   Alive hosts : $alive_file"
+    [ -n "$OUTPUT_FILE" ] && echo "   Breakdown   : $OUTPUT_FILE"
     echo "============================================="
+
+    rm -f "$tmp_status"
 
     GRAND_TOTAL=$((GRAND_TOTAL + total))
     GRAND_ALIVE=$((GRAND_ALIVE + alive))
@@ -364,8 +430,9 @@ check_file() {
 
 # ── Run over every input file ───────────────────────────────────────────────────
 echo ""
-echo "[*] Using httpx: $HTTPX_BIN"
-echo "[*] Lists to check: ${#INPUT_FILES[@]}"
+echo "[*] Using httpx : $HTTPX_BIN"
+echo "[*] Lists       : ${#INPUT_FILES[@]}"
+[ -n "$OUTPUT_FILE" ] && echo "[*] Output file : $OUTPUT_FILE"
 
 for f in "${INPUT_FILES[@]}"; do
     check_file "$f"
@@ -381,6 +448,7 @@ if [ ${#INPUT_FILES[@]} -gt 1 ]; then
     echo "   Alive               : $GRAND_ALIVE"
     echo "   Dead                : $GRAND_DEAD"
     echo "   Output directory    : $OUTPUT_DIR"
+    [ -n "$OUTPUT_FILE" ] && echo "   Breakdown saved     : $OUTPUT_FILE"
     echo "============================================================="
 fi
 echo ""
