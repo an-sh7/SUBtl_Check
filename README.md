@@ -1,7 +1,7 @@
 # SUBtl-Check
 
 A lightweight **subdomain status checker**. Feed it a list of hosts (such as the
-output of [Sub_Recon](../Sub_Recon)) and it probes each one with
+output of [Sub_Recon](https://github.com/P4rC3L/Sub_Recon) and it probes each one with
 [ProjectDiscovery `httpx`](https://github.com/projectdiscovery/httpx) to tell you
 which subdomains are **alive** and what **HTTP status code** they return.
 
